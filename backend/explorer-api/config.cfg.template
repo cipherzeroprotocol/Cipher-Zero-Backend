@@ -1,0 +1,46 @@
+{
+    "mongo": {
+        "uri": "",
+        "address": "localhost",
+        "port": 27017,
+        "dbName": "test"
+    },
+    "node": {
+        "address": "localhost",
+        "port": 16888,
+        "path": "/rpc"
+    },
+    "log": {
+        "level": "debug"
+    },
+    "server": {
+        "port": 8443,
+        "socketIOPort": 2096
+    },
+    "blockchain": {
+        "networkId": "test_chain"
+    },
+    "coinmarketcap":{
+        "key": "COINMARKETCAP_API_KEY",
+        "thetaId": 2416,
+        "tfuelId": 3822,
+        "tdropId": 17806
+    },
+    "cert":{
+        "enabled": false,
+        "key": "",
+        "crt": ""
+    },
+    "redis": {
+        "enabled": false,
+        "isCluster": false,
+        "host": "127.0.0.1",
+        "port": 6379,
+        "password": "",
+        "family": 4,
+        "db": 0
+    },
+    "defaultThetaChainID": "testnet",
+    "xApiToken": "",
+    "thetaRPCEndpoint": ""
+}
