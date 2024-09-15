@@ -17,6 +17,11 @@ var KEEPALIVE_PERIOD = 120000;
 var MAX_REQUESTS = 10;
 
 var LOGGER = require('log4js').getLogger('peer.js');
+const net = require('net');
+const util = require('util');
+const bencode = require('./util/bencode');
+const crypto = require('crypto');
+const snarkjs = require('snarkjs');
 
 var Peer = function(/* stream */ /* or */ /* peer_id, address, port, torrent */) {
   EventEmitter.call(this);
@@ -64,6 +69,25 @@ var Peer = function(/* stream */ /* or */ /* peer_id, address, port, torrent */)
 
   this.connect();
 
+  // Remove the duplicate declaration of 'ZK_WASM_FILE'
+  
+  this.zkPeerDiscovery = new TorrentProofGenerator(ZK_WASM_FILE, ZK_ZKEY_FILE);
+
+  this.generateZKProof();
+
+
+  const ZK_WASM_FILE = "./zk-circuits/peer-discovery.wasm";
+  const ZK_ZKEY_FILE = "./zk-circuits/peer-discovery.zkey";
+  
+  const Peer = function(/* ... existing parameters ... */) {
+    // ... (keep existing constructor logic)
+  
+    this.zkProof = null;
+    this.publicSignals = null;
+  
+    // ... (keep rest of the constructor)
+  };
+  util.inherits(Peer, EventEmitter);
   var self = this;
   setTimeout(function() { forceUpdateRates(self) }, 1000);
 };
@@ -644,6 +668,114 @@ function updateRates(self, kind) {
       // just want to keep the first and the last entry in history
       history.splice(1,1);
     }
+  }
+}
+Peer.prototype.generateZKProof = async function() {
+  const input = {
+    peerIdHash: this.hashPeerId(this.peerId),
+    addressHash: this.hashAddress(this.address, this.port)
+  };
+
+  try {
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, ZK_WASM_FILE, ZK_ZKEY_FILE);
+    this.zkProof = proof;
+    this.publicSignals = publicSignals;
+  } catch (error) {
+    LOGGER.error('Failed to generate ZK proof:', error);
+  }
+};
+
+Peer.prototype.verifyZKProof = async function(proof, publicSignals) {
+  try {
+    const vKey = await snarkjs.zKey.exportVerificationKey(ZK_ZKEY_FILE);
+    return await snarkjs.groth16.verify(vKey, publicSignals, proof);
+  } catch (error) {
+    LOGGER.error('Failed to verify ZK proof:', error);
+    return false;
+  }
+};
+
+Peer.prototype.hashPeerId = function(peerId) {
+  return crypto.createHash('sha256').update(peerId).digest('hex');
+};
+
+Peer.prototype.hashAddress = function(address, port) {
+  return crypto.createHash('sha256').update(`${address}:${port}`).digest('hex');
+};
+
+// Modify the connect method to include ZK proof generation
+Peer.prototype.connect = async function() {
+  await this.generateZKProof();
+  
+  var self = this;
+
+  if (this.stream === null) {
+    LOGGER.debug('Connecting to peer at ' + this.address + ' on ' + this.port);
+    this.stream = net.createConnection(this.port, this.address);
+    this.stream.on('connect', function() {onConnect(self);});
+  }
+
+  this.stream.on('data', function(data) {onData(self, data);});
+  this.stream.on('drain', function() {onDrain(self);});
+  this.stream.on('end', function() {onEnd(self);});
+  this.stream.on('error', function(e) {onError(self, e);});
+};
+
+// Modify the handshake process to include ZK proof exchange
+function doHandshake(self) {  
+  self.debugStatus += 'handshake:';
+  var stream = self.stream;
+  stream.write(BITTORRENT_HEADER);
+  stream.write(self.torrent.infoHash);
+  stream.write(self.torrent.clientId);
+  
+  // Send ZK proof and public signals
+  const proofData = Buffer.from(JSON.stringify({proof: self.zkProof, publicSignals: self.publicSignals}));
+  stream.write(proofData);
+
+  self.handshake = true;
+  LOGGER.debug('Sent HANDSHAKE with ZK proof to ' + self.getIdentifier());
+}
+
+function handleHandshake(self) {
+  var data = self.data;
+  if (data.length < 68) {
+    // Not enough data.
+    return;
+  }
+  if (!BufferUtils.equal(BITTORRENT_HEADER.slice(0, 20), data.slice(0, 20))) {
+    self.disconnect('Invalid handshake. data = ' + data.toString('binary'));
+  } else {  
+    self.debugStatus += 'incoming_handshake:';
+
+    var infoHash = data.slice(28, 48);
+    self.peerId = data.toString('binary', 48, 68);
+    
+    // Extract and verify ZK proof
+    const proofData = JSON.parse(data.slice(68).toString());
+    self.verifyZKProof(proofData.proof, proofData.publicSignals).then(isValid => {
+      if (!isValid) {
+        self.disconnect('Invalid ZK proof');
+        return;
+      }
+      
+      LOGGER.debug('Received valid HANDSHAKE with ZK proof from ' + self.getIdentifier());
+
+      self.data = Buffer.alloc(0);  // Clear the data buffer after successful handshake
+
+      self._supportsExtension = (data[25] & 0x10) > 0;
+
+      self.connected = true;
+      if (self.torrent) {
+        self.initialised = true;
+        self.running = true;
+        nextMessage(self);
+        processData(self);
+        self.emit(Peer.CONNECT);
+      } else {
+        self.emit(Peer.CONNECT, infoHash);
+      }
+    });
   }
 }
 
