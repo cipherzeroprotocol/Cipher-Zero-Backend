@@ -22,7 +22,129 @@ var { ZeroAddress, EventHashMap, CommonEventABIs } = require('./constants');
 var { getHex } = require('./utils');
 var { ethers } = require("ethers");
 var Logger = require('./logger');
+const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
+const { Program } = require('@project-serum/anchor');
+const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const { ethers } = require('ethers');
+const axios = require('axios');
+const Logger = require('./logger');
 
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
+
+exports.checkTokenStandard = function(abi) {
+  const requiredFunctions = [
+    'balanceOf', 'transfer', 'transferFrom', 'approve', 'allowance',
+    'totalSupply', 'name', 'symbol', 'decimals'
+  ];
+  
+  const requiredEvents = ['Transfer', 'Approval'];
+  
+  const hasAllFunctions = requiredFunctions.every(func => 
+    abi.some(item => item.type === 'function' && item.name === func)
+  );
+  
+  const hasAllEvents = requiredEvents.every(event => 
+    abi.some(item => item.type === 'event' && item.name === event)
+  );
+  
+  return hasAllFunctions && hasAllEvents;
+}
+
+exports.decodeLog = function(log, abi) {
+  const iface = new ethers.utils.Interface(abi);
+  try {
+    const decoded = iface.parseLog(log);
+    return {
+      name: decoded.name,
+      args: decoded.args
+    };
+  } catch (error) {
+    Logger.error('Error decoding log:', error);
+    return null;
+  }
+}
+
+exports.callContractMethod = async function(programId, methodName, args) {
+  try {
+    const program = await Program.at(new PublicKey(programId), connection);
+    const result = await program.rpc[methodName](...args);
+    return result;
+  } catch (error) {
+    Logger.error(`Error calling contract method ${methodName}:`, error);
+    throw error;
+  }
+}
+
+exports.getTokenMetadata = async function(mint) {
+  try {
+    const metadataPDA = await PublicKey.findProgramAddress(
+      [
+        Buffer.from('metadata'),
+        TOKEN_PROGRAM_ID.toBuffer(),
+        new PublicKey(mint).toBuffer(),
+      ],
+      new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s') // Metadata program ID
+    );
+    const accountInfo = await connection.getAccountInfo(metadataPDA[0]);
+    if (accountInfo) {
+      // Parse metadata here
+      // This is a simplified example; you'd need to implement proper deserialization
+      const metadata = JSON.parse(accountInfo.data);
+      return metadata;
+    }
+    return null;
+  } catch (error) {
+    Logger.error('Error fetching token metadata:', error);
+    return null;
+  }
+}
+
+exports.estimateTransactionFee = async function(transaction) {
+  try {
+    const { blockhash } = await connection.getRecentBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const simulation = await connection.simulateTransaction(transaction);
+    return simulation.value.feeCalculator.lamportsPerSignature;
+  } catch (error) {
+    Logger.error('Error estimating transaction fee:', error);
+    throw error;
+  }
+}
+
+exports.getTokenSupply = async function(tokenMint) {
+  try {
+    const supply = await connection.getTokenSupply(new PublicKey(tokenMint));
+    return supply.value.uiAmount;
+  } catch (error) {
+    Logger.error('Error getting token supply:', error);
+    throw error;
+  }
+}
+
+exports.isContract = async function(address) {
+  try {
+    const accountInfo = await connection.getAccountInfo(new PublicKey(address));
+    return accountInfo !== null && accountInfo.owner.equals(new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111'));
+  } catch (error) {
+    Logger.error('Error checking if address is a contract:', error);
+    return false;
+  }
+}
+
+exports.getContractAbi = async function(address) {
+  try {
+    const accountInfo = await connection.getAccountInfo(new PublicKey(address));
+    if (accountInfo) {
+      const abi = JSON.parse(accountInfo.data);
+      return abi;
+    }
+    return null;
+  } catch (error) {
+    Logger.error('Error getting contract ABI:', error);
+    return null;
+  }
+}
 exports.updateToken = async function (tx, smartContractDao, tokenDao, tokenSummaryDao, tokenHolderDao) {
   let addressList = _getContractAddressSet(tx);
   if (addressList.length === 0) {
@@ -624,7 +746,7 @@ const _checkTnt20 = function (abi) {
 
   return _check(obj, abi);
 }
-exports.checkTnt20 = _checkTnt20;
+//exports.checkTnt20 = _checkTnt20;
 
 
 function _check(obj, abi) {

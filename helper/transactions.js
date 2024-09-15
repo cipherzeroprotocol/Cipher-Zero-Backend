@@ -1,5 +1,5 @@
-var helper = require('../crawler/helper/utils');
-var Logger = require('../crawler/helper/logger');
+var helper = require('../helper/utils');
+var Logger = require('../helper/logger');
 
 exports.getBriefTxs = function (txs) {
   const res = []
