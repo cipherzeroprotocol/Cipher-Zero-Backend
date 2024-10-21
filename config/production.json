@@ -1,0 +1,20 @@
+{
+    "port": 8080,
+    "database": {
+        "uri": "mongodb://your-production-db-uri-here:27017/cipherzero",
+        "options": {
+            "useNewUrlParser": true,
+            "useUnifiedTopology": true
+        }
+    },
+    "encryptionAlgorithm": "aes-256-cbc",
+    "encryptionKey": "your-production-secure-key-here", 
+    "jwt": {
+        "secret": "your-production-jwt-secret-here",
+        "expiresIn": "24h"
+    },
+    "api": {
+        "baseUrl": "/api/v1"
+    },
+    "logLevel": "info"
+}
