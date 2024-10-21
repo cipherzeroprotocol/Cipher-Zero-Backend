@@ -1,5 +1,5 @@
 const express = require('express');
-const zkTorrentController = require('../../controllers/zkTorrentController');
+const zkTorrentController = require('../controllers/zkTorrentController');
 
 const router = express.Router();
 
@@ -13,5 +13,9 @@ router.post('/encrypt-message', zkTorrentController.encryptPeerMessage.bind(zkTo
 router.post('/decrypt-message', zkTorrentController.decryptPeerMessage.bind(zkTorrentController));
 router.get('/generate-dh-key-pair', zkTorrentController.generateDHKeyPair.bind(zkTorrentController));
 router.post('/compute-shared-secret', zkTorrentController.computeSharedSecret.bind(zkTorrentController));
+router.post('/create', zkTorrentController.createTorrent);
+router.get('/download/:infoHash', zkTorrentController.downloadTorrent);
+router.post('/transfer', zkTorrentController.transferData);
+router.get('/torrents', zkTorrentController.getTorrents);
 
 module.exports = router;

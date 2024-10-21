@@ -1,5 +1,5 @@
-const ZKTorrentService = require('../services/zkTorrentService');
-const TorrentPrivacyTools = require('../privacy/torrent_privacy_tools');
+const ZKTorrentService = require('../../services/zkTorrentService');
+const TorrentPrivacyTools = require('../../privacy/torrent_privacy_tools');
 const LOGGER = require('log4js').getLogger('zkTorrentController.js');
 
 class ZKTorrentController {
@@ -13,6 +13,37 @@ class ZKTorrentController {
         await this.privacyTools.initialize();
     }
 
+    
+  async createTorrent(req, res) {
+    try {
+      const { file, privateData } = req.body;
+      const torrent = await this.zkTorrentService.createTorrent(file, privateData);
+      res.json(torrent);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async downloadTorrent(req, res) {
+    try {
+      const { infoHash } = req.params;
+      const torrent = await this.zkTorrentService.downloadTorrent(infoHash);
+      res.json(torrent);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async transferData(req, res) {
+    try {
+      const { data, recipient } = req.body;
+      const result = await this.zkTorrentService.transferData(data, recipient);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+    
     async initiateZKPeerDiscovery(req, res) {
         try {
             const { peerId, ip, port } = req.body;
