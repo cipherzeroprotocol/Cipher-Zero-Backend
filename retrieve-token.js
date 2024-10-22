@@ -1,141 +1,220 @@
-var bluebird = require("bluebird");
-var fs = require('fs');
-var rpc = require('./crawler/api/rpc.js');
-var Logger = require('./crawler/helper/logger.js');
-var mongoClient = require('../mongo-db/mongo-client.js')
-var progressDaoLib = require('../mongo-db/progress-dao.js');
-var blockDaoLib = require('../mongo-db/block-dao.js');
-var transactionDaoLib = require('../mongo-db/transaction-dao.js');
-var accountDaoLib = require('../mongo-db/account-dao.js');
-var accountTxDaoLib = require('../mongo-db/account-tx-dao.js');
-var smartContractDaoLib = require('../mongo-db/smart-contract-dao.js')
-var tokenDaoLib = require('../mongo-db/token-dao.js')
-var tokenSummaryDaoLib = require('../mongo-db/token-summary-dao.js')
-var tokenHolderDaoLib = require('../mongo-db/token-holder-dao.js')
-var dailyAccountDaoLib = require('../mongo-db/daily-account-dao')
+const { Connection, PublicKey } = require('@solana/web3.js');
+const { 
+  LightSystemProgram, 
+  createRpc 
+} = require('@lightprotocol/stateless.js');
+const Redis = require('ioredis');
+const logger = require('./utils/logger');
+const { getTokenInfo } = require('./services/tokenService');
 
-var Redis = require("ioredis");
-var redis = null;
-var redisConfig = null;
-var cacheConfig = null; // node local cache configuration
-var cacheEnabled = false;
-
-var readPreTokenCronJob = require('./crawler/jobs/read-previous-token.js');
-var express = require('express');
-var app = express();
-var cors = require('cors');
-
-//------------------------------------------------------------------------------
-//  Global variables
-//------------------------------------------------------------------------------
-var config = null;
-var configFileName = 'config.cfg'
-var blockDao = null;
-var rewardDistributionDao = null;
-
-//------------------------------------------------------------------------------
-//  Start from here
-//------------------------------------------------------------------------------
-main();
-
-function main() {
-  Logger.initialize('token')
-  // load config
-  Logger.log('Loading config file: ' + configFileName)
-  try {
-    config = JSON.parse(fs.readFileSync(configFileName));
-  } catch (err) {
-    Logger.log('Error: unable to load ' + configFileName);
-    Logger.log(err);
-    process.exit(1);
+class TokenRetriever {
+  constructor(mongoClient, redisConfig) {
+    this.mongoClient = mongoClient;
+    this.redis = this.setupRedis(redisConfig);
+    this.rpc = null;
+    this.connection = null;
   }
-  const networkId = config.blockchain.networkId;
-  const retrieveStartHeight = config.retrieveTokenStartHeight;
-  rpc.setConfig(config);
 
-  bluebird.promisifyAll(rpc);
+  setupRedis(redisConfig) {
+    if (!redisConfig || !redisConfig.enabled) {
+      return null;
+    }
 
-  redisConfig = config.redis;
-  Logger.log("redisConfig:", redisConfig)
-  cacheEnabled = config.nodeCache && config.nodeCache.enabled;
-  Logger.log('cacheEnabled:', cacheEnabled);
-  if (redisConfig && redisConfig.enabled) {
-    redis = redisConfig.isCluster ? new Redis.Cluster([
-      {
-        host: redisConfig.host,
-        port: redisConfig.port,
-      },
-    ], {
-      redisOptions: {
-        password: redisConfig.password,
-      }
-    }) : new Redis(redisConfig);
-    bluebird.promisifyAll(redis);
-    redis.on("connect", () => {
-      Logger.log('connected to Redis');
+    const redis = redisConfig.isCluster ? 
+      new Redis.Cluster([
+        {
+          host: redisConfig.host,
+          port: redisConfig.port,
+        }
+      ], {
+        redisOptions: {
+          password: redisConfig.password,
+        }
+      }) : new Redis(redisConfig);
+
+    redis.on('connect', () => {
+      logger.info('Connected to Redis');
     });
+
+    redis.on('error', (error) => {
+      logger.error('Redis connection error:', error);
+    });
+
+    return redis;
   }
 
-  // connect to mongoDB
-  mongoClient.init(__dirname, config.mongo.address, config.mongo.port, config.mongo.dbName);
-  mongoClient.connect(config.mongo.uri, function (error) {
-    if (error) {
-      Logger.log('Mongo DB connection failed with err: ', error);
-      process.exit();
-    } else {
-      Logger.log('Mongo DB connection succeeded');
-      setupGetBlockCronJob(mongoClient, networkId, retrieveStartHeight);
+  async initialize(config) {
+    try {
+      // Initialize Solana connection
+      this.connection = new Connection(config.solana.rpcUrl, 'confirmed');
+      this.rpc = createRpc(config.solana.rpcUrl);
+
+      // Initialize database collections
+      this.tokensCollection = this.mongoClient.collection('tokens');
+      this.tokenSummaryCollection = this.mongoClient.collection('token_summary');
+      this.tokenHoldersCollection = this.mongoClient.collection('token_holders');
+
+      logger.info('Token retriever initialized successfully');
+    } catch (error) {
+      logger.error('Failed to initialize token retriever:', error);
+      throw error;
     }
-  });
+  }
+
+  async retrieveCompressedToken(mintAddress) {
+    try {
+      // Check cache first if Redis is enabled
+      if (this.redis) {
+        const cachedToken = await this.redis.get(`token:${mintAddress}`);
+        if (cachedToken) {
+          return JSON.parse(cachedToken);
+        }
+      }
+
+      // Get token account info using ZK compression
+      const { compressedAccount } = await this.rpc.getCompressedTokenAccount(
+        new PublicKey(mintAddress)
+      );
+
+      if (!compressedAccount) {
+        throw new Error('Token account not found');
+      }
+
+      // Get additional token information
+      const tokenInfo = await getTokenInfo(mintAddress, this.connection);
+
+      const token = {
+        address: mintAddress,
+        name: tokenInfo.name,
+        symbol: tokenInfo.symbol,
+        decimals: tokenInfo.decimals,
+        totalSupply: tokenInfo.supply.toString(),
+        holders: await this.getTokenHolderCount(mintAddress),
+        compressedData: compressedAccount,
+        lastUpdated: new Date()
+      };
+
+      // Save to database
+      await this.saveTokenData(token);
+
+      // Cache if Redis enabled
+      if (this.redis) {
+        await this.redis.set(
+          `token:${mintAddress}`, 
+          JSON.stringify(token),
+          'EX',
+          3600 // Cache for 1 hour
+        );
+      }
+
+      return token;
+
+    } catch (error) {
+      logger.error(`Error retrieving token ${mintAddress}:`, error);
+      throw error;
+    }
+  }
+
+  async getTokenHolderCount(mintAddress) {
+    try {
+      return await this.tokenHoldersCollection.countDocuments({
+        tokenMint: mintAddress
+      });
+    } catch (error) {
+      logger.error(`Error getting holder count for ${mintAddress}:`, error);
+      return 0;
+    }
+  }
+
+  async saveTokenData(token) {
+    try {
+      // Update token info
+      await this.tokensCollection.updateOne(
+        { address: token.address },
+        { $set: token },
+        { upsert: true }
+      );
+
+      // Update token summary
+      await this.tokenSummaryCollection.updateOne(
+        { address: token.address },
+        {
+          $set: {
+            name: token.name,
+            symbol: token.symbol,
+            totalSupply: token.totalSupply,
+            holders: token.holders,
+            lastUpdated: token.lastUpdated
+          }
+        },
+        { upsert: true }
+      );
+
+    } catch (error) {
+      logger.error('Error saving token data:', error);
+      throw error;
+    }
+  }
+
+  async retrieveAllTokens() {
+    try {
+      logger.info('Starting retrieval of all tokens');
+      const tokens = await this.tokensCollection.find({}).toArray();
+
+      for (const token of tokens) {
+        await this.retrieveCompressedToken(token.address);
+        // Add delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      logger.info('Completed retrieval of all tokens');
+    } catch (error) {
+      logger.error('Error retrieving all tokens:', error);
+      throw error;
+    }
+  }
+
+  async cleanup() {
+    try {
+      if (this.redis) {
+        await this.redis.quit();
+      }
+      logger.info('Token retriever cleanup completed');
+    } catch (error) {
+      logger.error('Error during cleanup:', error);
+    }
+  }
 }
 
+module.exports = TokenRetriever;
 
-function setupGetBlockCronJob(mongoClient, networkId, retrieveStartHeight) {
-  // initialize DAOs
-  progressDao = new progressDaoLib(__dirname, mongoClient, redis);
-  bluebird.promisifyAll(progressDao);
+// Example usage:
+/*
+const config = require('./config');
+const mongoClient = require('./mongo-client');
 
-  blockDao = new blockDaoLib(__dirname, mongoClient, redis);
-  bluebird.promisifyAll(blockDao);
+async function main() {
+  const tokenRetriever = new TokenRetriever(mongoClient, config.redis);
+  await tokenRetriever.initialize(config);
 
-  transactionDao = new transactionDaoLib(__dirname, mongoClient, redis);
-  bluebird.promisifyAll(transactionDao);
+  try {
+    // Retrieve single token
+    const token = await tokenRetriever.retrieveCompressedToken(
+      'TOKEN_MINT_ADDRESS'
+    );
+    console.log('Retrieved token:', token);
 
-  accountDao = new accountDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(accountDao);
+    // Retrieve all tokens
+    await tokenRetriever.retrieveAllTokens();
 
-  accountTxDao = new accountTxDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(accountTxDao);
-
-  smartContractDao = new smartContractDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(smartContractDao);
-
-  tokenDao = new tokenDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(tokenDao);
-
-  tokenSummaryDao = new tokenSummaryDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(tokenSummaryDao);
-
-  tokenHolderDao = new tokenHolderDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(tokenHolderDao);
-
-  dailyAccountDao = new dailyAccountDaoLib(__dirname, mongoClient);
-  bluebird.promisifyAll(dailyAccountDao);
-
-  readPreTokenCronJob.Initialize(progressDao, blockDao, transactionDao, accountDao, accountTxDao,
-    smartContractDao, tokenDao, tokenHolderDao, tokenSummaryDao, dailyAccountDao, config.contractAddressMap);
-
-  setTimeout(async function run() {
-    Logger.log('Start of Execute.');
-    const startTime = +new Date();
-    let flag = { result: true };
-    await readPreTokenCronJob.Execute(networkId, retrieveStartHeight, flag);
-    if (flag.result) {
-      readPreTokenTimer = setTimeout(run, 1000);
-    } else {
-      Logger.log('Mission Completed!');
-    }
-    Logger.log('End of Execute, takes:', (+new Date() - startTime) / 1000, ' seconds');
-  }, 1000);
-
+  } catch (error) {
+    console.error('Error:', error);
+  } finally {
+    await tokenRetriever.cleanup();
+  }
 }
+
+if (require.main === module) {
+  main();
+}
+*/
