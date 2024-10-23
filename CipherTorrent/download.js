@@ -6,7 +6,21 @@ const tracker = require('./tracker');
 const message = require('./message');
 const Pieces = require('./Pieces');
 const Queue = require('./Queue');
+const BitTorrent = require('bittorrent-protocol');
+const net = require('net');
 
+class Downloader {
+  constructor(config) {
+    this.config = config;
+    this.peers = new Map();
+  }
+
+  async start(magnetLink) {
+    // Implementation
+  }
+}
+
+module.exports = Downloader;
 module.exports = (torrent, path) => {
   tracker.getPeers(torrent, peers => {
     const pieces = new Pieces(torrent);

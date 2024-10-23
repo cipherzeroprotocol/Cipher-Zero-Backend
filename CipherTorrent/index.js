@@ -3,7 +3,6 @@ const { initServices } = require("./lib/config/init");
 const download = require('./src/download');
 const torrentParser = require('./src/torrent-parser');
 
-const torrent = torrentParser.open(process.argv[2]);
 async function main() {
     const services = await initServices();
     const { zkSyncWallet, wormholeClient, zkSnarkService } = services;
